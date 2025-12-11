@@ -64,9 +64,14 @@ pub struct FileStatisticsCacheEntry {
 /// command on the local filesystem. This operation can be expensive,
 /// especially when done over remote object stores.
 ///
+/// The `Extra` type is `Path`, which represents the table's base path.
+/// This enables prefix-aware cache lookups: when querying for a partition
+/// prefix (e.g., `table/a=1/`), the cache can return filtered results from
+/// a cached parent prefix (e.g., `table/`) if available.
+///
 /// See [`crate::runtime_env::RuntimeEnv`] for more details.
 pub trait ListFilesCache:
-    CacheAccessor<Path, Arc<Vec<ObjectMeta>>, Extra = ObjectMeta>
+    CacheAccessor<Path, Arc<Vec<ObjectMeta>>, Extra = Path>
 {
     /// Returns the cache's memory limit in bytes.
     fn cache_limit(&self) -> usize;

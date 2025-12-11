@@ -254,7 +254,7 @@ impl ListingTableUrl {
         };
 
         let list: BoxStream<'a, Result<ObjectMeta>> = if self.is_collection() {
-            list_with_cache(ctx, store, &prefix).await?
+            list_with_cache(ctx, store, &prefix, &self.prefix).await?
         } else {
             match store.head(&prefix).await {
                 Ok(meta) => futures::stream::once(async { Ok(meta) })
@@ -263,7 +263,7 @@ impl ListingTableUrl {
                 // If the head command fails, it is likely that object doesn't exist.
                 // Retry as though it were a prefix (aka a collection)
                 Err(object_store::Error::NotFound { .. }) => {
-                    list_with_cache(ctx, store, &prefix).await?
+                    list_with_cache(ctx, store, &prefix, &self.prefix).await?
                 }
                 Err(e) => return Err(e.into()),
             }
@@ -324,10 +324,22 @@ impl ListingTableUrl {
     }
 }
 
+/// Lists files with cache support, using prefix-aware lookups.
+///
+/// # Arguments
+/// * `ctx` - The session context
+/// * `store` - The object store to list from
+/// * `prefix` - The actual prefix to list (may include partition path)
+/// * `table_base_path` - The table's base path (used for prefix-aware cache lookups)
+///
+/// When `prefix` is a sub-path of `table_base_path` (e.g., partition pruning),
+/// this function will attempt to serve the request from a cached listing of
+/// the table base path, filtering results to match the requested prefix.
 async fn list_with_cache<'b>(
     ctx: &'b dyn Session,
     store: &'b dyn ObjectStore,
     prefix: &Path,
+    table_base_path: &Path,
 ) -> Result<BoxStream<'b, Result<ObjectMeta>>> {
     match ctx.runtime_env().cache_manager.get_list_files_cache() {
         None => Ok(store
@@ -335,15 +347,21 @@ async fn list_with_cache<'b>(
             .map(|res| res.map_err(|e| DataFusionError::ObjectStore(Box::new(e))))
             .boxed()),
         Some(cache) => {
-            let vec = if let Some(res) = cache.get(prefix) {
-                debug!("Hit list all files cache");
+            // Try prefix-aware cache lookup: first exact match, then parent prefix
+            let vec = if let Some(res) = cache.get_with_extra(prefix, table_base_path) {
+                debug!("Hit list files cache (prefix-aware)");
                 res.as_ref().clone()
             } else {
+                // Cache miss - fetch from storage
                 let vec = store
                     .list(Some(prefix))
                     .try_collect::<Vec<ObjectMeta>>()
                     .await?;
-                cache.put(prefix, Arc::new(vec.clone()));
+                // Only cache if we're listing the table base path (complete data)
+                // Don't cache partition-specific listings to avoid incomplete data issues
+                if prefix == table_base_path {
+                    cache.put(prefix, Arc::new(vec.clone()));
+                }
                 vec
             };
             Ok(futures::stream::iter(vec.into_iter().map(Ok)).boxed())
